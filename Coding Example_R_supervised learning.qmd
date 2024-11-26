@@ -1,0 +1,698 @@
+---
+title: "DS202A - W08 Summative"
+author: '39652'
+output: html
+self-contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = -1)
+```
+
+# **Part 0: Import libraries and create functions**
+
+```{r}
+# Preparation: Import libraries and create functions
+# Step 1: Check and install missing packages to ensure my codes are replicable
+required_packages <- c(
+  "tidyverse", "ggsci", "janitor", "tidymodels", 
+  "xgboost", "kernlab", "LiblineaR", 
+  "rpart", "rpart.plot", "viridis", "doParallel", "vip"
+)
+
+installed_packages <- rownames(installed.packages())
+
+for (pkg in required_packages) {
+  if (!(pkg %in% installed_packages)) {
+    install.packages(pkg)
+  }
+}
+
+# Step 2: Load libraries
+library(tidyverse)   # Data wrangling and visualization
+library(ggsci)       # Color palettes (Lab02)
+library(janitor)     # data cleaning
+library(tidymodels)  # Machine learning framework (Lab03-Lab07)
+library(xgboost)     # Gradient boosting (Lab05, supervised learning lecture)
+library(kernlab)     # SVMs and kernel-based methods (Lab05)
+library(LiblineaR)   # Linear classification (Lab05)
+library(rpart)       # Decision trees (supervised learning lecture)
+library(rpart.plot)  # Tree visualization
+library(viridis)     # Color palettes (Lab02, Lab05)
+library(doParallel)  # Parallel processing
+library(vip)
+
+# Step 3: Suppress warnings to keep output clean
+options(warn = -1)
+
+# Step 4: Global chunk options
+# Ensure code chunks display both code and output
+knitr::opts_chunk$set(echo = TRUE)
+
+# Step 5: Define custom ggplot themes
+# Clean layout for scatterplots(I copied from reading week homework solution)
+theme_dot <- function() {
+  theme_minimal() +
+    theme(panel.grid = element_blank(),
+          legend.position = "bottom")
+}
+
+# Clean layout for line plots(I copied from reading week homework solution)
+theme_line <- function() {
+  theme_minimal() +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major.x = element_blank(),
+          legend.position = "bottom")
+}
+```
+
+# Part 1: Data Wrangling and Exploratory Analysis
+
+#### **1. Load the data into a data frame called aq_bench. Freely explore the data on your own.**
+
+```{r}
+# Load the air quality dataset
+aq_bench <- read_csv("data/AQBench_dataset.csv")
+# Convert to tibble for a compact display 
+aq_bench <- aq_bench %>% as_tibble()
+# Report the number of rows and columns in the dataset
+cat("Number of rows:", nrow(aq_bench), "\n") #  this gives the total number of observations
+cat("Number of columns:", ncol(aq_bench), "\n")# this gives the total number of variables
+# Preview the first few rows of the dataset
+head(aq_bench)
+# Statistical Summary of the dataset
+summary(aq_bench)
+# Check for missing values in a tidy format
+aq_bench %>%
+  summarise_all(~ sum(is.na(.))) %>% # Count missing values per column
+  pivot_longer(cols = everything(),
+               names_to = "Column",
+               values_to = "Missing_Values") %>%
+  filter(Missing_Values > 0) # Show only columns with missing values
+```
+
+Answer: This dataset collects global air quality metrics from 70 countries, comprising 53 geographic, demographic, and environmental variables, including ozone concentration and related indicators. Observations are disproportionately distributed across countries, with some contributing significantly more data. Notably, there are no missing values in the dataset.
+
+#### **2a. Filter the dataset into a new dataframe called `aq_bench_filtered` to remove the `lat`, `lon` and `dataset`columns**
+
+```{r}
+# Filter the dataset to remove 'lat', 'lon', and 'dataset' columns
+aq_bench_filtered <- aq_bench %>%
+  select(-lat, -lon, -dataset)
+# have a look at the structure of the filtered dataset
+head(aq_bench_filtered)
+```
+
+Answer: after removing the `lat`, `lon` and `dataset`columns, we have 50 columns left.
+
+#### **3.What are the 5 countries with the highest number of rows in the dataset? and What are the 5 countries with the lowest number of rows in the dataset?**
+
+```{r}
+country_counts <- aq_bench %>%
+  count(country, sort = TRUE)
+# Top 5 countries by row count
+top_5_countries <- country_counts%>%
+  slice_max(n, n = 5)
+# Bottom 5 countries by row count
+bottom_5_countries <- country_counts %>%
+  slice_min(n, n = 5)
+# Display results
+print("Top 5 countries by row count:")
+print(top_5_countries)
+print("Bottom 5 countries by row count:")
+print(bottom_5_countries)
+```
+
+Answer: The 5 countries with the highest number of rows are the United States of America (1390 observations), Japan (1182), Spain (440), France (404), and Italy (361). While 15 countries have only 1 observation, the first five alphabetically are Algeria, American Samoa, Armenia, Barbados, and Bermuda.
+
+#### **4.What is the median NO2 per type of area?**
+
+```{r}
+# Calculate the median NO2 per type of area
+median_no2_by_type <- aq_bench %>%
+  group_by(type_of_area) %>%
+  summarise(median_no2 = median(no2_column, na.rm = TRUE))
+
+# Display the result
+print("Median NO2 per type of area:")
+print(median_no2_by_type)
+```
+
+Answer: Urban areas have the highest median NO2 (4.05), followed by suburban (3.44), unknown (2.46), rural (2.32), and remote areas with the lowest (0.81). This suggests a positive correlation between urbanization and NO2 emissions,though causation cannot be inferred.
+
+#### **5.Create a plot that shows the relationship between population density and O3 average values. What does this plot tell you?**
+
+```{r}
+# Scatter plot with regression line
+ggplot(aq_bench_filtered, aes(x = population_density, y = o3_average_values)) +
+  geom_point(alpha = 0.6) +                                   # Scatter points
+  geom_smooth(method = "lm", color = "red", se = FALSE) +     # Linear regression line
+  labs(
+    title = "Figure 1.The relationship between Population Density O3 Average Values",
+    x = "Population Density",
+    y = "O3 Average Values"
+  ) +
+  theme_dot()                                          
+```
+
+Answer: According to Figure 1, there is a negative linear relationship between population density and O3 average values. This suggests that, all else being equal, higher population density is associated with lower O3 average values. However, this relationship should not be interpreted as causal.
+
+# **Part 2: Creating regression models**
+
+Aim: We want to predict ozone concentration levels based on other geographical and socioeconomic variables. To systematically address this, I will begin with a simple multivariate regression model in Part 2.1. This initial step serves as a foundation for understanding the relationship between o3_average_values as well as providing a benchmark to assess model performance. In Part 2.2, I will improve model performance via adopting different measures I have learnt during the course.
+
+### **Part 2.0 Data Preprocessing**
+
+1.  Removing unnecessary columns (`lat`, `lon`, `dataset`) and countries with fewer than 10 observations.
+
+2.  Handling missing values by imputing the median for numeric variables and the mode for categorical variables.
+
+3.  Dropping any remaining rows with missing values after imputation.
+
+4.  A naive regression may involving regressing the target variables on all the other variables, this could result in labeling spillover, where predictors leak information from the target variable, causing over-fitting, therefore I will remove all the variables that start with o3
+
+5.  Splitting the cleaned data into training (75%) and testing (25%) sets, stratified by `o3_average_values`.
+
+```{r}
+#  Remove unnecessary columns
+aq_bench_filtered <- aq_bench %>%
+  select(-lat, -lon, -dataset)
+
+# Remove countries with fewer than 10 observationsy
+unique_countries <- country_counts %>%
+  filter(n < 10) %>%
+  pull(country)
+aq_bench_cleaned <- aq_bench_filtered %>%
+  filter(!country %in% unique_countries)
+
+# Impute missing numeric values with the median for robustness against outliers
+aq_bench_cleaned <- aq_bench_cleaned %>%
+  mutate(across(where(is.numeric), ~ if_else(is.na(.), median(., na.rm = TRUE), .)))
+
+# Impute missing categorical values with the mode
+aq_bench_cleaned <- aq_bench_cleaned %>%
+  mutate(across(where(is.factor), ~ if_else(is.na(.), 
+                                            names(sort(table(.), decreasing = TRUE))[1], 
+                                            .)))
+# Remove any remaining rows with missing values after imputation
+aq_bench_cleaned <- aq_bench_cleaned %>%
+  drop_na()
+
+# I will address labeling spillover by excluding all variables starting with "o3_" except for the target variable
+o3_related_vars <- colnames(aq_bench_cleaned)[
+  str_detect(colnames(aq_bench_cleaned), regex("^o3_", ignore_case = TRUE)) &
+  colnames(aq_bench_cleaned) != "o3_average_values"
+]
+aq_bench_cleaned <- aq_bench_cleaned %>%
+  select(-all_of(o3_related_vars))
+# Split 75% of the data into the training set and 25% into the testing set stratified by the target variable 'o3_average_values' to maintain its distribution
+aq_split <- initial_split(aq_bench_cleaned, prop = 0.75, strata = o3_average_values)
+aq_train <- training(aq_split)
+aq_test  <- testing(aq_split)
+
+# Normalize numeric predictors to ensure all features are on a similar scale
+aq_recipe <- recipe(o3_average_values ~ ., data = aq_train) %>%
+  step_normalize(all_numeric_predictors())
+```
+
+### **Part 2.1 Baseline regression model and its evaluation**
+
+I will start with training a baseline multivariate regression in which all the features are used to predict o3_average_values
+
+```{r}
+#Baseline model specification
+lm_spec <- linear_reg() %>%
+  set_engine("lm")
+
+#preprocessing recipe
+baseline_recipe <- recipe(o3_average_values ~ ., data = aq_train) %>%
+  step_normalize(all_numeric_predictors())
+
+#baseline workflow
+baseline_workflow <- workflow() %>%
+  add_recipe(baseline_recipe) %>%
+  add_model(lm_spec)
+
+# Fit the model on the training data
+baseline_fit <- baseline_workflow %>%
+  fit(data = aq_train)
+
+# Evaluate the model on training and test sets
+train_predictions <- baseline_fit %>%
+  predict(new_data = aq_train) %>%
+  bind_cols(aq_train)
+
+test_predictions <- baseline_fit %>%
+  predict(new_data = aq_test) %>%
+  bind_cols(aq_test)
+
+# compute metrics for training and test set
+mape <- function(data, truth, estimate) {
+  mean(abs((truth - estimate) / truth), na.rm = TRUE) * 100
+}
+train_metrics <- train_predictions %>%
+  metrics(truth = o3_average_values, estimate = .pred) %>%
+  bind_rows(tibble(
+    .metric = "mape",
+    .estimator = "standard",
+    .estimate = mape(train_predictions, train_predictions$o3_average_values, train_predictions$.pred)
+  ))
+test_metrics <- test_predictions %>%
+  metrics(truth = o3_average_values, estimate = .pred) %>%
+  bind_rows(tibble(
+    .metric = "mape",
+    .estimator = "standard",
+    .estimate = mape(test_predictions, test_predictions$o3_average_values, test_predictions$.pred)
+  ))
+
+#Table for training and test metrics
+combined_metrics <- bind_rows(
+  train_metrics %>% mutate(dataset = "Train"),
+  test_metrics %>% mutate(dataset = "Test")
+) %>%
+  select(dataset, .metric, .estimate) %>%
+  pivot_wider(names_from = dataset, values_from = .estimate)
+print(combined_metrics)
+
+# Plot residuals for the test set
+test_predictions %>%
+  mutate(residuals = o3_average_values - .pred) %>%
+  ggplot(aes(x = .pred, y = residuals)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Residuals Plot ",
+    x = "Predicted Values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+```
+
+Comment on Model performance:The baseline model performs reasonably well, with some areas for improvement. Looking at the metrics table above, the R\^2 is 0.67 for the training set and 0.65 for the test set, indicating that the model explains approximately 65% of the variance in the target variable. The discrepancy between RMSE/MAE across the training and test sets can be used to assess overfitting. The slight increase in RMSE (3.62 → 3.76) and MAE (2.73 → 2.85) from the training to the test set suggests minimal overfitting, as the performance on unseen data is only marginally worse. Additionally, the MAPE values (\~10%) for both sets indicate good predictive accuracy in percentage terms. However, the residual plot reveals a noticeable pattern: residuals tend to cluster near the center, suggesting the model consistently underpredicts for lower fitted values and overpredicts for higher fitted values. This behavior implies that the model may struggle to fully capture the relationships between predictors and the target variable, potentially due to omitted variables or unaccounted-for non-linear effects. While the residuals are generally scattered around zero, the central clustering points to systematic issues that could be potentially addressed via other models. Overall, the baseline model provides a reasonable starting point with strong generalization, but there is room for improvement.
+
+### **Part 2.2 Model Improvement**
+
+A valid concern with our baseline model is the potential presence of near or perfect multicollinearity, which can destabilize point estimates. Classical approaches to address this issue include using nested tibble approaches to remove highly correlated predictors and applying feature engineering to improve the model (as demonstrated in Lab 3). I calibrated the model using standalone nested tibble approaches, standalone feature engineering (including incorporating population² to capture non-linear effects), and a combination of both. However, all these approaches yielded worse model performance compared to the baseline.
+
+Consequently, I considered dimensionality reduction techniques like PCA and Lasso regression, which address multicollinearity through feature selection and model regularization. However, these methods, when applied individually, also failed to improve performance. Therefore, I will try a combined approach using Lasso regression with PCA (as demonstrated in Lab 4). Unlike the method used in Lab 3 (Step 5), I will not use the nested tibble approach but will instead employ grid search combined with 10-fold cross-validation to tune the hyperparameters (`num_comp` and `penalty`) of the PCA and Lasso model, as this is less computationally expensive.
+
+```{r}
+# Define 10-fold cross-validation on the training data
+folds <- vfold_cv(aq_train, v = 10)
+#Lasso regression model with a tunable penalty score
+lasso_model <- 
+  linear_reg(penalty = tune(), mixture = 1) %>% # Lasso regularization
+  set_engine("glmnet")
+#recipe for PCA + Lasso
+pca_recipe <- 
+  recipe(o3_average_values ~ ., data = aq_train) %>%
+  step_dummy(all_nominal_predictors()) %>% # Convert categorical variables to dummies
+  step_normalize(all_numeric_predictors()) %>% # Normalize predictors
+  step_pca(all_numeric_predictors(), num_comp = tune()) # PCA with tunable components
+#Combine recipe and model into a workflow
+pca_lasso_workflow <- 
+  workflow() %>%
+  add_recipe(pca_recipe) %>%
+  add_model(lasso_model)
+#Define grid for tuning both PCA components and Lasso penalty and perform grid search with cross-validation
+pca_grid <- expand.grid(
+  num_comp = c(5, 10, 15, 20),          # Number of PCA components to test
+  penalty = c(0.001, 0.005, 0.01, 0.05, 0.1) # Lasso penalties
+)
+pca_lasso_tune_results <- 
+  tune_grid(
+    pca_lasso_workflow,
+    resamples = folds,
+    grid = pca_grid
+  )
+#update the workflow with the "best" PCA and Lassoparameters selected based on RMSE
+best_pca_lasso <- select_best(pca_lasso_tune_results, metric = "rmse")
+print(best_pca_lasso)
+final_pca_lasso_workflow <- 
+  pca_lasso_workflow %>%
+  finalize_workflow(best_pca_lasso)
+# Fit the "best" PCA + Lasso model on the training data and evaluate on the test set
+final_pca_lasso_fit <- final_pca_lasso_workflow %>%
+  last_fit(aq_split)
+# Collect metrics for the final PCA + Lasso model, including R^2,RMSE,MAPE and MAE
+final_pca_predictions <- final_pca_lasso_fit %>%
+  collect_predictions() 
+final_pca_additional_metrics <- final_pca_predictions %>%
+  summarize(
+    mae = mean(abs(.pred - o3_average_values), na.rm = TRUE),
+    mape = mean(abs((o3_average_values - .pred) / o3_average_values), na.rm = TRUE) * 100
+  )
+# summary table for test metrics
+final_pca_metrics <- final_pca_lasso_fit %>%
+  collect_metrics() %>%
+  bind_rows(
+    final_pca_additional_metrics %>%
+      pivot_longer(cols = c(mae, mape), names_to = ".metric", values_to = ".estimate")
+  )
+print(final_pca_metrics)
+#residuals plot for the "best" PCA+LASSO model
+final_pca_predictions %>%
+  mutate(residuals = o3_average_values - .pred) %>%
+  ggplot(aes(x = .pred, y = residuals)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals Plot for PCA+Lasso Model", x = "Predicted Values", y = "Residuals")
+```
+
+Reasons for PCA+Lasso: Lasso regression applies L1 regularization, which penalizes larger coefficients and shrinks less important predictors to zero, effectively performing feature selection. This is particularly useful when dealing with datasets that include many predictors (which happens to be our case), as it reduces noise and focuses on the most relevant features. On the other hand, PCA is a dimensionality reduction technique that transforms the original predictors into uncorrelated components, each representing a portion of the variance in the dataset. PCA addresses multicollinearity by ensuring that the predictors used in the model are orthogonal, which improves model stability. Combining Lasso and PCA allows us to simplify the feature space while retaining the most important information for prediction.
+
+Re-sampling strategy: 10-fold cross-validation provides a more robust evaluation than a simple train-test split by ensuring every observation is used for both training and validation. Unlike a single split, which can lead to biased results if the split is unrepresentative, cross-validation averages performance across multiple folds, reducing variability and providing a more reliable estimate. It also ensures hyperparameter tuning (e.g., Lasso penalty and PCA components) selects parameters that generalize well across subsets, rather than fitting to one specific split.
+
+Model Comparison: Despite these efforts, the PCA + Lasso model performed worse than the baseline. The baseline model achieved an RMSE of 3.756, an R² of 0.648,and a MAPE of approximately 10%. In contrast, the improved model had an RMSE of 4.560, an R² of 0.481,and a MAPE of 13.57%. This decline in performance can be attributed to several factors. First, PCA may have caused a loss of important information by transforming predictors into components, potentially excluding highly predictive features. The dimensionality reduction to 20 components might have over-simplified the feature space, leading to underfitting. Second, the chosen Lasso penalty of 0.01 may have further penalized relevant components, compounding the loss of information. Lastly, the baseline model was already robust, explaining approximately 65% of the variance in the target variable, leaving limited room for improvement.
+
+# **Part 3: Create classification models**
+
+Aim: The aim of this part of the analysis is to predict the potability of water based on various attributes. To systematically address this, I will begin with a simple classification model in Part 3.1 and subsequently improve model performance by adopting non-linear classification algorithms in Part 3.2. Note: Extensive Exploratory Data Analysis (EDA) was conducted to understand the dataset; however, the detailed EDA steps and visualizations are excluded here to maintain readability.
+
+### **Part 3.0 Data Preprocessing**
+
+1.  I imputed missing values in the numeric columns with the median of each column to ensure robustness against outliers.
+2.  I converted the water potability column into a factor, as this is required for classification algorithms to function correctly.
+3.  I checked whether the dataset is highly imbalanced, and found the dataset is moderately imbalanced(see output for the code chunk below). Therefore, I split the dataset (stratified by potability) to ensure that class proportions remain consistent across the training and test sets. **Note**: Due to the imbalance, I will not use accuracy as the evaluation metric, as it can be artificially inflated by consistently predicting the majority class while ignoring the minority class.
+
+```{r}
+# Load the dataset
+water_data <- read.csv("data/water_potability.csv")
+# Replace the missing values by imputing with median
+water_data <- water_data %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+# Convert Potability into a factor
+water_data$Potability <- as.factor(water_data$Potability)
+# Check if the dataset is imbalanced
+prop.table(table(water_data$Potability))
+# The dataset is moderately unbalanced, so perform stratified splitting
+set.seed(1307)  # Ensure reproducibility
+water_split <- initial_split(water_data, prop = 0.75, strata = Potability)
+# Create training and test sets
+water_train <- training(water_split)
+water_test <- testing(water_split)
+```
+
+### **Part 3.1 Baseline Classification model and its evaluation**
+
+I started by training a baseline logistic regression model using all the features. The model was trained on the training set and evaluated on the test set. I plotted the confusion matrix and displayed the first few rows of the dataset to provide an overview. Note: I have only reported the results, confusion matrix, and test metrics on the test set, as it best represents the model's performance on unseen data.
+
+```{r}
+# Define the workflow for the logistic regression model
+log_reg_spec <- logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")
+log_reg_workflow <- workflow() %>%
+  add_model(log_reg_spec) %>%
+  add_formula(Potability ~ .)
+# Fit the logistic regression model to the training data
+log_reg_fit <- log_reg_workflow %>%
+  fit(data = water_train) # Ensure you're using the correct training dataset
+# Predict probabilities and class labels for the test set
+log_reg_preds <- log_reg_fit %>%
+  predict(new_data = water_test, type = "prob") %>%
+  bind_cols(
+    log_reg_fit %>%
+      predict(new_data = water_test, type = "class") # I Specified type = "class" for predicted labels here
+  )
+# Combine predictions with the test set
+testing_results <- water_test %>%
+  bind_cols(log_reg_preds)
+# View a few rows of the results and the confusion matrix
+conf_mat <- testing_results %>%
+  conf_mat(truth = Potability, estimate = .pred_class)
+head(testing_results)
+print(conf_mat)
+```
+
+### **3.1.1 Regression Coefficient Interpretation**
+
+To understand the regression coefficient, we first extract them from our model.
+
+```{r}
+# Extract regression coefficients from the fitted logistic regression model
+log_reg_coeffs <- tidy(log_reg_fit)
+# Calculate Odds Ratios (exp of the coefficients)
+log_reg_coeffs <- log_reg_coeffs %>%
+  mutate(Odds_Ratio = exp(estimate))
+# Create a bar plot for coefficients and odds ratios
+ggplot(log_reg_coeffs, aes(x = reorder(term, estimate), y = estimate)) +
+  geom_bar(stat = "identity", fill = "skyblue") +  # Bar plot
+  geom_text(aes(label = round(Odds_Ratio, 2)), hjust = -0.1) + # Add odds ratio labels
+  coord_flip() + # Flip coordinates for readability
+  labs(
+    title = "Logistic Regression Coefficients and Odds Ratios",
+    x = "Predictors",
+    y = "Coefficient (Log-Odds)"
+  ) +
+  theme_minimal()
+```
+
+To understand the coefficients, we must consider the classification model being used. Here, the regression model predicts the probability (P) of water being potable based on features (X1–X9)
+
+$$
+\log\left(\frac{P}{1 - P}\right) = \beta_0 + \beta_1 X_1 + \beta_2 X_2 + \dots + \beta_9 X_9
+$$The coefficients indicate whether a feature increases or decreases the likelihood of water potability. For instance, features like Organic Carbon, pH, and Turbidity have negative coefficients, meaning higher values reduce the probability of potability. A one-unit increase in pH, for example, decreases the odds of potability, with an odds ratio of 0.97 (less than 1).In contrast, features like Hardness, Conductivity, and Solids have coefficients near zero, indicating negligible influence. The intercept represents the baseline log-odds of potability when all predictors are at their reference values.
+
+While log-odds are less intuitive, the actual probability can be calculated using the logistic function for a given set of predictor values.\
+$$
+P = \frac{\exp(\beta_0 + \beta_1 X_1 + \beta_2 X_2 + \dots + \beta_9 X_9)}{1 + \exp(\beta_0 + \beta_1 X_1 + \beta_2 X_2 + \dots + \beta_9 X_9)}
+$$
+
+```{r}
+# Let us see an example use ph
+# extract regression coefficients for
+print(log_reg_coeffs)
+beta_0 <- -0.0979  # Intercept
+beta_1 <- -0.0278  # Coefficient for ph
+X1_base <- 7       # Baseline pH
+X1_new <- X1_base + 1  # Increase pH by 1 unit
+
+# Partial formula: calculate log-odds for baseline and new pH
+log_odds_base <- beta_0 + beta_1 * X1_base
+log_odds_new <- beta_0 + beta_1 * X1_new
+
+# Convert log-odds to probabilities
+P_base <- exp(log_odds_base) / (1 + exp(log_odds_base))
+P_new <- exp(log_odds_new) / (1 + exp(log_odds_new))
+
+# Calculate change in probability
+P_change <- P_new - P_base
+
+# Print results
+cat("Probability at pH =", X1_base, ":", round(P_base, 4), "\n")
+cat("Probability at pH =", X1_new, ":", round(P_new, 4), "\n")
+cat("Change in probability:", round(P_change, 4), "\n")
+```
+
+For example, consider pH and hold all else equal/at base line, when pH is 7, the probability of water being potable is 42.74%. At pH 8, this decreases slightly to 42.06%,which means that the marginal effect of a 1-unit increase in pH, holding other variables constant leads to a 0.68% reduction in potability probability. However, it is important to realize that the marginal effect of a 1-unit increase would differ at different base values due to the sigmoid-shaped nature of the function.
+
+### **3.1.2 Model evaluation:**
+
+Given the imbalanced dataset, I disregard accuracy as an evaluation metric. Neglecting economic implications, the cost of false negatives (missing potable water) is relatively low compared to the significant public health threat posed by false positives (predicting unsafe water as potable). While recall is important to measure the incidence of false positives, the confusion matrix reveals a considerable number of false negatives cases too. Therefore, I will use the F1 score to strike a balance between precision and recall. Additionally, I will evaluate the model using the ROC-AUC metric to assess its ability to discriminate between the two classes across various thresholds, these metrics are reported as annotations on the ROC curve.
+
+```{r}
+# Ensure 'Potability' is a factor with correct level ordering
+testing_results <- testing_results %>%
+  mutate(Potability = factor(Potability, levels = c("0", "1")))
+
+# Generate ROC curve data
+roc_curve_data <- testing_results %>%
+  roc_curve(truth = Potability, .pred_1)
+
+# Calculate ROC-AUC
+roc_auc_score <- testing_results %>%
+  roc_auc(truth = Potability, .pred_1, event_level = "second") %>%
+  pull(.estimate)
+
+# Calculate F1 score
+f1_score <- testing_results %>%
+  f_meas(truth = Potability, estimate = .pred_class, event_level = "second") %>%
+  pull(.estimate)
+
+# Plot the ROC Curve with F1 Score and ROC-AUC annotated
+roc_curve_plot <- ggplot(roc_curve_data, aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line(color = "blue", size = 1) +  # ROC curve
+  geom_abline(linetype = "dashed", color = "red") +  # Reference diagonal
+  annotate(
+    "text", x = 0.7, y = 0.2, hjust = 0, size = 5, label = paste(
+      "ROC-AUC:", round(roc_auc_score, 2), "\n",
+      "F1 Score:", round(f1_score, 2)
+    )
+  ) +
+  labs(
+    title = "ROC Curve with F1 Score and ROC-AUC",
+    x = "1 - Specificity (False Positive Rate)",
+    y = "Sensitivity (True Positive Rate)"
+  ) +
+  theme_minimal()
+
+# Display the ROC curve with annotations
+print(roc_curve_plot)
+```
+
+To assess the goodness-of-fit of the baseline model, we cannot use the standard R-squared metric. However, we can consider alternative methods such as the Hosmer-Lemeshow test or Pseudo R-Squared (specifically, McFadden's R²), even though these methods were not covered in the lecture or lab. That said, it is not strictly necessary to employ these methods in this case.
+
+Looking at the figure above, the ROC-AUC for our model is 0.51, which indicates that its performance is almost equivalent to random guessing. Furthermore, the model has an F1 score of 0. This result arises because the model's recall is 0. As observed in the confusion matrix produced earlier, there are no true positives in the model's predictions. Although we care about minimizing the frequency of false negatives, it is clear that this baseline model (barely) has any predictive power.
+
+### **Part 3.2 Model Improvement**
+
+The baseline model's limited predictive power likely stems from non-linear relationships and dataset imbalance. To address this, we consider non-linear classifiers. K-Nearest Neighbors (KNN) performs well on small datasets with clear class boundaries but is computationally intensive and sensitive to irrelevant features. Support Vector Machines (SVM), particularly with kernels, handle high-dimensional, non-linear data effectively but require extensive hyperparameter tuning and are computationally expensive for larger datasets. Decision trees are interpretable and quick but prone to overfitting without pruning or depth constraints. Random Forest thus stands out as the best choice, effectively managing non-linear relationships, irrelevant features, and dataset complexities while delivering robust predictive performance. I constructed the model with the following steps
+
+1.  Since Random Forests are less sensitive to the number of trees when the dataset is large, I specified a prototype Random Forest model with 500 trees as a rule of thumb (Probst and Boulesteix, 2017).
+2.  Picking the optimal mtry (number of features randomly selected at each split of a tree) using a 5-fold cross validation.
+3.  Fit the final random forest model
+
+Note that I have used cross-validation only for hyperparameter tuning but not for training the model. this avoids redundancy since the "best" hyperparameter already generalize well across different subsets of the data, thus applying cross-validation during training would introduce unnecessary computational overhead without offering significant additional value.
+
+```{r}
+# Split the data into training and testing sets for the prototype random forest model
+set.seed(123) 
+split <- initial_split(water_data, prop = 0.75, strata = Potability)
+training_data <- training(split)
+testing_data <- testing(split)
+
+# Define the work flow for the prototype Random Forest model
+rf_spec <- 
+  rand_forest(mtry = tune(), trees = 500, min_n = 10) %>%
+  set_engine("randomForest", importance = TRUE) %>%
+  set_mode("classification")
+
+rf_recipe <- 
+  recipe(Potability ~ ., data = training_data) # Create a recipe for preprocessing
+
+rf_workflow <- 
+  workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_spec) # Combine the recipe and model into a workflow
+
+# Tuning mtry hyperparameter
+# Define a tuning grid for mtry
+rf_grid <- grid_regular(
+  mtry(range = c(2, ncol(training_data) - 1)), # Select range for number of predictors
+  levels = 5 # Number of grid points
+)
+
+# Perform 5-fold cross-validation to tune the Random Forest model
+set.seed(123)
+rf_resamples <- vfold_cv(training_data, v = 5)
+rf_tuned <- tune_grid(
+  rf_workflow,
+  resamples = rf_resamples,
+  grid = rf_grid,
+  metrics = metric_set(roc_auc, accuracy)
+)
+# Extract the best hyperparameters
+best_params <- select_best(rf_tuned, metric = "roc_auc")
+print(best_params)
+
+# Fit the final random forest model with best parameters
+# the new workflow with the best parameters
+final_rf_workflow <- finalize_workflow(rf_workflow, best_params)
+# Fit the Random Forest model to the training data
+rf_model <- fit(final_rf_workflow, data = training_data)
+# Extract the fitted Random Forest engine
+rf_fit <- extract_fit_engine(rf_model)
+# Plot feature importance
+rf_fit %>%
+  vip(geom = "col", aesthetics = list(fill = "midnightblue", alpha = 0.8)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(title = "Feature Importance",
+       subtitle = "Top features influencing Potability predictions")
+```
+
+Comments on resampling techniques: Using 5-fold cross-validation ensures robust performance estimates in this context as it provides a reliable basis for hyperparameter tuning and thus reducing the overfitting risks in compared to a simple train-test split. Looking at the feature importance graph above, despite the fact that different features have been identified of different levels of importance, the optimal number of features randomly selected features at each split of a trees is till 9(`mtry = 9)` ,meaning that all features are considered for splitting at each node. While one may argue that this now seems like a redundant step, it is nonetheless a good precautionary check i.e. in other cases, maybe it is sub-optimal to use all the features. In addition to that, one may wonder why features of low importance or even negative importance are included too. This is because Random Forest is an ensemble model that relies on the interactions between features across many different trees, thus these features can play an important role in specific interactions that improve the model’s overall accuracy.
+
+### **Part 3.3 Model Evaluation**
+
+to evaluate the model, I will look at the following
+
+1.  Confusion matrix for the training set with the F1 score for training set
+2.  Confusion matrix for the test set with the F1 score for test set
+
+Note that I have not include precision and recall on purpose, because TP in the baseline model was 0, leading to 0 precision and recall, therefore, if we see an increase in F1 score it must mean that the model has got better.
+
+```{r}
+# Confusion Matrix for the Training Set
+conf_mat_training <- rf_model %>%
+  augment(new_data = training_data) %>%
+  conf_mat(truth = Potability, estimate = .pred_class)
+conf_mat_training_df <- as.data.frame(conf_mat_training$table)#formatting
+conf_mat_training_df$Truth <- factor(conf_mat_training_df$Truth, levels = c(0, 1))
+conf_mat_training_df$Prediction <- factor(conf_mat_training_df$Prediction, levels = c(0, 1))
+
+# Compute F1 Score for the Training Set
+training_f1 <- rf_model %>%
+  augment(new_data = training_data) %>%
+  f_meas(truth = Potability, estimate = .pred_class) %>%
+  pull(.estimate)
+
+# Plot Confusion Matrix for the Training Set
+ggplot(conf_mat_training_df, aes(x = Prediction, y = Truth, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 5) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = paste("Confusion Matrix - Training Set (F1 Score:", round(training_f1, 2), ")"),
+    x = "Predicted", y = "Actual"
+  ) +
+  theme_minimal()
+
+# Confusion Matrix for the Test Set
+conf_mat_testing <- rf_model %>%
+  augment(new_data = testing_data) %>%
+  conf_mat(truth = Potability, estimate = .pred_class)
+
+conf_mat_testing_df <- as.data.frame(conf_mat_testing$table)#formatting
+conf_mat_testing_df$Truth <- factor(conf_mat_testing_df$Truth, levels = c(0, 1))
+conf_mat_testing_df$Prediction <- factor(conf_mat_testing_df$Prediction, levels = c(0, 1))
+
+# Compute F1 Score for the Test Set
+testing_f1 <- rf_model %>%
+  augment(new_data = testing_data) %>%
+  f_meas(truth = Potability, estimate = .pred_class) %>%
+  pull(.estimate)
+
+# Plot Confusion Matrix for the Test Set
+ggplot(conf_mat_testing_df, aes(x = Prediction, y = Truth, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 5) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = paste("Confusion Matrix - Test Set (F1 Score:", round(testing_f1, 2), ")"),
+    x = "Predicted", y = "Actual"
+  ) +
+  theme_minimal()
+```
+
+While it is not surprising to see the model performs exceptionally well on the training set, what we care about is how well the model generalizes to unseen data and in particular whether it outperforms my baseline logistic regression.
+
+**True Negatives (TN): From 498 to 441**
+
+-   The number of true negatives decreased slightly, indicating the model now predicts slightly fewer negative cases (`0`) correctly, but I would argue this trade-off is acceptable given the overall improvements in positive class predictions below.
+
+**False Positives (FP): From 2 to 59**
+
+-   The false positives increased, which means the new model makes more errors in predicting `1` when the true class is `0`. The model is now less conservative and more willing to predict `1`, which can improve recall for the positive class at the cost of precision, this is again a trade-off that I think to be acceptable
+
+**False Negatives (FN): From 320 to 218**
+
+-   The false negatives dropped significantly. This is a major improvement, indicating the model is now **correctly identifying 102 additional positive cases (1)**compared to the old model. Reducing false negatives is particularly important in our case for economic implications i.e. now we have better knowledge with regard to the distribution of water potability.
+
+**True Positives (TP): From 0 to 102**
+
+-   The new model correctly identifies 102 positive cases, compared to none in the old model. This dramatic improvement indicates the new model is much better at handling the minority class (`1`), addressing the issue of the old model completely failing to recognize positive cases.
+
+**F1 Score: From 0 to 0.76**
+
+-   The F1 score jumped from 0 to 0.76, reflecting a significant improvement in the model's ability to balance precision and recall. Again, the old model's F1 score of 0 suggests it completely failed to recognize the positive class (`1`), where as the random forest model has a good balance between precision(0.6335) and recall(0.31875)
+
+Based on the evidence above, the random forest model indeed outperform the baseline.
+
+# Reference list
+
+Probst, P. and Boulesteix, A.-L. (2017). *To tune or not to tune the number of trees in random forest?* \[online\] arXiv.org. Available at: https://arxiv.org/abs/1705.05654?utm_source=chatgpt.com \[Accessed 21 Nov. 2024\].
+
+# Disclaimer on the use of generative AI: I have used ChatGPT for debugging, correcting grammar and spelling in the text response, as well as a source for concept explanations.
